@@ -22,18 +22,20 @@ class PyBy:
         self.code_obj = None
         self.code_defs = {
             "argcount": 0,
-            "nlocals": 0,
             "stacksize": 0,
             "flags": 0x0000,
-            "consts": (),
-            "names": (),
-            "varnames": (),
+            "consts": [None],
+            "names": [],
+            "varnames": [],
             "name": "",
             "firstlineno": 1,
             "lnotab": bytes(),
             "freevars": (),
             "cellvars": (),
         }
+        self.const_table = {'None': 0}
+        self.name_table = {}
+        self.var_table = {}
 
     def init_constants(self):
         for defn in self.directives:
@@ -45,14 +47,46 @@ class PyBy:
                 else:
                     self.code_defs[name] = ast.literal_eval(value)
 
+            match = re.match(r"^\#const\s+(\w+)\s+(.*)$", defn)
+            if match:
+                cname, cval = match.groups()
+                cval = ast.literal_eval(cval)
+                if cval not in self.code_defs['consts']:
+                    self.code_defs['consts'].append(cval)
+                self.const_table[cname] = self.code_defs['consts'].index(cval)
+
+            match = re.match(r"^\#defn\s+(.*)$", defn)
+            if match:
+                matched = re.split(r',\s*', match.group(1))
+                fn_names = ', '.join('"{0}"'.format(w) for w in matched)
+                self.code_defs["names"] = tuple(ast.literal_eval(fn_names))
+                self.name_table = {v: k for k, v in dict(enumerate(self.code_defs['names'])).items()}
+
+            match = re.match(r"^\#defvar\s+(.*)$", defn)
+            if match:
+                matched = re.split(r',\s*', match.group(1))
+                var_names = ', '.join('"{0}"'.format(w) for w in matched)
+                self.code_defs["varnames"] = tuple(ast.literal_eval(var_names))
+                self.var_table = {v: k for k, v in dict(enumerate(self.code_defs['varnames'])).items()}
+
+
     def gen_bytecode(self):
         for ln in self.code:
             val = ln.split()
-            if val:
+            if val and val[0][0] != '%':
                 instr = val[0].upper()
                 if instr in dis.opmap:
                     if len(val) > 1:
-                        ins = [dis.opmap[instr], int(val[1]), 0]
+                        if re.match(r'[A-Z0-9]+_CONST', instr):
+                            arg = self.const_table[val[1]]
+                        elif re.match(r'[A-Z0-9]+_GLOBAL', instr):
+                            arg = self.name_table[val[1]]
+                        elif re.match(r'[A-Z0-9]+_FAST', instr):
+                            arg = self.var_table[val[1]]
+                        else:
+                            arg = int(val[1])
+
+                        ins = [dis.opmap[instr], arg, 0]
                         self.bytecode.extend(ins)
                     else:
                         self.bytecode.append(dis.opmap[instr])
@@ -62,13 +96,13 @@ class PyBy:
     def gen_PyObj(self):
         self.code_obj = types.CodeType(
             self.code_defs["argcount"],
-            self.code_defs["nlocals"],
+            len(self.code_defs["varnames"]),
             self.code_defs["stacksize"],
             self.code_defs["flags"],
             self.__to_bytes(),
-            self.code_defs["consts"],
-            self.code_defs["names"],
-            self.code_defs["varnames"],
+            tuple(self.code_defs["consts"]),
+            tuple(self.code_defs["names"]),
+            tuple(self.code_defs["varnames"]),
             self.fname,
             self.code_defs["name"],
             self.code_defs["firstlineno"],
