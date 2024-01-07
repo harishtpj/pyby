@@ -1,0 +1,29 @@
+#const p1 'Enter no 1: '
+#const p2 'Enter no 2: '
+#const ans 'The sum of %d and %d is %d'
+#defn int, raw_input
+#defvar a, b
+
+load int
+load raw_input
+load p1
+call_function 1
+call_function 1
+store_fast a
+%load ola
+load int
+load raw_input
+load p2
+call_function 1
+call_function 1
+store_fast b
+
+load ans
+load a
+load b
+dup_topx 2
+add
+build_tuple 3
+modulo
+println
+return None

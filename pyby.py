@@ -29,7 +29,7 @@ class PyBy:
             "varnames": [],
             "name": "",
             "firstlineno": 1,
-            "lnotab": bytes(),
+            "lnotab": [],
             "freevars": (),
             "cellvars": (),
         }
@@ -71,11 +71,31 @@ class PyBy:
 
 
     def gen_bytecode(self):
+        max_size = 0
+        stack_size = 0
+        foundFirstline = False
+        blank_line = 0
+
         for ln in self.code:
             val = ln.split()
             if val and val[0][0] != '%':
+                if not foundFirstline:
+                    self.code_defs['firstlineno'] = self.src.index(self.code[0]) + blank_line + 1
+                    foundFirstline = True
+                    blank_line = 0
+                elif blank_line != 0:
+                    self.code_defs['lnotab'][-1] += blank_line
+                    blank_line = 0
+
                 instr = val[0].upper()
                 if instr in dis.opmap:
+                    if self.__match_push(instr):
+                        stack_size += 1
+                        max_size = max(max_size, stack_size)
+                    elif self.__match_pop(instr):
+                        stack_size -= 1
+
+
                     if len(val) > 1:
                         if re.match(r'[A-Z0-9]+_CONST', instr):
                             arg = self.const_table[val[1]]
@@ -88,10 +108,75 @@ class PyBy:
 
                         ins = [dis.opmap[instr], arg, 0]
                         self.bytecode.extend(ins)
+                        self.code_defs['lnotab'].extend([3, 1])
                     else:
                         self.bytecode.append(dis.opmap[instr])
+                        self.code_defs['lnotab'].extend([1, 1])
+
+                elif instr == 'PRINTLN':
+                    self.bytecode.extend([dis.opmap['PRINT_ITEM'], dis.opmap['PRINT_NEWLINE']])
+                    self.code_defs['lnotab'].extend([2, 1])
+                    stack_size -= 1
+
+                elif instr == 'STORE':
+                    self.bytecode.extend([dis.opmap['STORE_FAST'], self.var_table[val[1]], 0])
+                    self.code_defs['lnotab'].extend([3, 1])
+                    stack_size -= 1
+
+                elif instr == 'RETURN':
+                    if val[1] in self.const_table:
+                        self.bytecode.extend([dis.opmap['LOAD_CONST'], self.const_table[val[1]], 0])
+                    elif val[1] in self.var_table:
+                        self.bytecode.extend([dis.opmap['LOAD_FAST'], self.var_table[val[1]], 0])
+                    else:
+                        obj, isNum = self.__check_numeric(val[1])
+                        if isNum:
+                            ref = self.code_defs['consts']
+                            ref.append(obj)
+                            self.bytecode.extend([dis.opmap['LOAD_CONST'], ref.index(obj), 0])
+                            self.const_table[val[1]] = ref.index(obj)
+                        else:
+                            self.__raise_err('Unexpected value for RETURN macro: %s' % val[1])
+                    self.bytecode.append(dis.opmap['RETURN_VALUE'])
+                    self.code_defs['lnotab'].extend([4, 1])
+
+                elif instr == 'LOAD':
+                    if val[1] in self.const_table:
+                        self.bytecode.extend([dis.opmap['LOAD_CONST'], self.const_table[val[1]], 0])
+                    elif val[1] in self.var_table:
+                        self.bytecode.extend([dis.opmap['LOAD_FAST'], self.var_table[val[1]], 0])
+                    elif val[1] in self.name_table:
+                        self.bytecode.extend([dis.opmap['LOAD_GLOBAL'], self.name_table[val[1]], 0])
+                    else:
+                        obj, isNum = self.__check_numeric(val[1])
+                        if isNum:
+                            ref = self.code_defs['consts']
+                            ref.append(obj)
+                            self.bytecode.extend([dis.opmap['LOAD_CONST'], ref.index(obj), 0])
+                            self.const_table[val[1]] = ref.index(obj)
+                        else:
+                            self.__raise_err('Unexpected value for LOAD macro: %s' % val[1])
+                    self.code_defs['lnotab'].extend([3, 1])
+                    stack_size += 1
+                    max_size = max(max_size, stack_size)
+
+                elif instr in ['ADD', 'SUBTRACT', 'MULTIPLY', 'DIVIDE', 'POWER', 
+                    'MODULO', 'LSHIFT', 'RSHIFT', 'AND', 'XOR', 'OR', 'SUBSCR']:
+                    self.bytecode.append(dis.opmap['BINARY_'+instr])
+                    self.code_defs['lnotab'].extend([1, 1])
+                    stack_size -= 1
+
+                elif instr in ['POSITIVE', 'NEGATIVE', 'NOT', 'INVERT']:
+                    self.bytecode.append(dis.opmap['UNARY_'+instr])
+                    self.code_defs['lnotab'].extend([1, 1])
+
                 else:
                     self.__raise_err("Unknown instruction: %s" % val[0])
+
+            else:
+                blank_line += 1
+
+        self.code_defs['stacksize'] = max_size if max_size > 0 else 5
 
     def gen_PyObj(self):
         self.code_obj = types.CodeType(
@@ -99,14 +184,14 @@ class PyBy:
             len(self.code_defs["varnames"]),
             self.code_defs["stacksize"],
             self.code_defs["flags"],
-            self.__to_bytes(),
+            self.__to_bytes(self.bytecode),
             tuple(self.code_defs["consts"]),
             tuple(self.code_defs["names"]),
             tuple(self.code_defs["varnames"]),
             self.fname,
             self.code_defs["name"],
             self.code_defs["firstlineno"],
-            self.code_defs["lnotab"],
+            self.__to_bytes(self.code_defs["lnotab"]),
             self.code_defs["freevars"],
             self.code_defs["cellvars"],
         )
@@ -147,13 +232,35 @@ class PyBy:
         print 'Sucessfully assembled and saved to %s' % self.target_fname
 
 
-    def __to_bytes(self):
-        return "".join(map(chr, self.bytecode))
+    def __to_bytes(self, obj):
+        return "".join(map(chr, obj))
 
     def __raise_err(self, msg):
         print 'ERROR!'
         print '\t' + msg
         sys.exit(-2)
+
+    def __match_push(self, instr):
+        push_patterns = [r'LOAD_[A-Z0-9]+', r'DUP_[A-Z0-9]+', r'UNPACK_[A-Z0-9]+']
+        for pattern in push_patterns:
+            if re.match(pattern, instr):
+                return True
+        return False
+
+    def __match_pop(self, instr):
+        pop_patterns = [r'STORE_[A-Z0-9]+', r'POP_[A-Z0-9]+', r'BINARY_[A-Z0-9]+', 
+        r'BUILD_[A-Z0-9]+', r'PRINT_ITEM_[A-Z]+']
+        for pattern in pop_patterns:
+            if re.match(pattern, instr):
+                return True
+        return False
+
+    def __check_numeric(self, val):
+        try:
+            evaluated = ast.literal_eval(val)
+            return evaluated, isinstance(evaluated, int) or isinstance(evaluated, float)
+        except (SyntaxError, NameError, TypeError):
+            return None, False
 
 
 if __name__ == "__main__":
